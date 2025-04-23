@@ -1,58 +1,90 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template for Kafka EC2 instance
-
 Parameters:
   KafkaInstanceType:
     Type: String
     Default: t2.medium
     Description: EC2 instance type for Kafka
   Environment:
-    Type: String
-    Default: dev
     Description: Environment name (dev, prod)
+    Type: String
+    Default: dev  
   KeyName:
     Description: Name of an existing EC2 KeyPair 
-    Type: 'AWS::EC2::KeyPair::KeyName'
-  PublicSubnetId:
-    Type: 'AWS::EC2::Subnet::Id'
-    Description: The ID of the public subnet where the instance will be launched
-  VPCId:
-    Type: 'AWS::EC2::VPC::Id'
-    Description: The ID of the VPC where the instance will be launched
-  AmazonLinux2AmiId:
     Type: String
-    Description: The AMI ID for Amazon Linux 2
-  KafkaSecurityGroup:
-    Type: 'AWS::EC2::SecurityGroup::Id'
-    Description: The ID of Security Group For Kafka Instance.
+    Default: Key-east-1
+  PublicSubnetId:
+    Description: The ID of the public subnet where the instance will be launched
+    Type: String
+    Default: "subnet-00506ba208f733b5a"
+  VPCId:
+    Description: The ID of the VPC where the instance will be launched
+    Type: String
+    Default: "vpc-0836bedb74e8e89aa"
 
 Resources:
+
+  KafkaInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH and Kafka access
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          CidrIp: 0.0.0.0/0
+          #SourceSecurityGroupId: sg-057555c4ee02cb967
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${Environment}-kafka-sg"
 
   KafkaInstance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref AmazonLinux2AmiId
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
       InstanceType: !Ref KafkaInstanceType
       SubnetId: !Ref PublicSubnetId
       KeyName: !Ref KeyName
       SecurityGroupIds:
-        - !Ref KafkaSecurityGroup
+        - !Ref KafkaInstanceSecurityGroup
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -ex
-          exec > /var/log/user-data.log 2>&1  # Redirect output to a log file
+          exec > /var/log/user-data.log 2>&1
           sleep 30s
-          sudo yum update -y && sudo yum install java-1.8.0-openjdk-devel -y
-          mkdir /home/ec2-user/Downloads
+
+          # Update system and install Java 8 (Corretto)
+          sudo dnf update -y
+          sudo dnf install -y java-1.8.0-amazon-corretto
+
+          # Create directories for Kafka
+          mkdir -p /home/ec2-user/Downloads
+          mkdir -p /home/ec2-user/kafka
+
+          # Download and extract Kafka
           curl "https://archive.apache.org/dist/kafka/2.7.0/kafka_2.12-2.7.0.tgz" -o /home/ec2-user/Downloads/kafka.tgz
-          mkdir /home/ec2-user/kafka && tar -xvzf /home/ec2-user/Downloads/kafka.tgz -C /home/ec2-user/kafka --strip-components=1
+          tar -xvzf /home/ec2-user/Downloads/kafka.tgz -C /home/ec2-user/kafka --strip-components=1
 
-          sudo chown -R ec2-user:ec2-user /home/ec2-user/kafka
-          sudo chmod -R 755 /home/ec2-user/kafka
+          # Set permissions
+          chown -R ec2-user:ec2-user /home/ec2-user/kafka
+          chmod -R 755 /home/ec2-user/kafka
 
-          echo "delete.topic.enable = true" | sudo tee -a /home/ec2-user/kafka/config/server.properties
-          echo "auto.create.topics.enable = true" | sudo tee -a /home/ec2-user/kafka/config/server.properties
-          cat <<EOF | sudo tee -a /etc/systemd/system/zookeeper.service
+          # Create log file for Kafka
+          touch /home/ec2-user/kafka/kafka.log
+          chown ec2-user:ec2-user /home/ec2-user/kafka/kafka.log
+
+          # Update Kafka configuration
+          echo "delete.topic.enable = true" >> /home/ec2-user/kafka/config/server.properties
+          echo "auto.create.topics.enable = true" >> /home/ec2-user/kafka/config/server.properties
+
+          # Create systemd service for Zookeeper
+          cat <<EOF | sudo tee /etc/systemd/system/zookeeper.service
           [Unit]
           Requires=network.target remote-fs.target
           After=network.target remote-fs.target
@@ -68,8 +100,8 @@ Resources:
           WantedBy=multi-user.target
           EOF
 
-          echo "creating kafka.service"
-          cat <<EOF | sudo tee -a /etc/systemd/system/kafka.service
+          # Create systemd service for Kafka
+          cat <<EOF | sudo tee /etc/systemd/system/kafka.service
           [Unit]
           Requires=zookeeper.service
           After=zookeeper.service
@@ -84,10 +116,14 @@ Resources:
           [Install]
           WantedBy=multi-user.target
           EOF
+
+          # Enable and start services
           sudo systemctl daemon-reload
-          sleep 1s
-          sudo systemctl start zookeeper.service && sudo systemctl enable zookeeper.service
-          sudo systemctl start kafka && sudo systemctl enable kafka
+          sleep 1
+          sudo systemctl enable --now zookeeper.service
+          sudo systemctl enable --now kafka.service
+
+
 
       Tags:
         - Key: Name
