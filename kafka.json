@@ -1,150 +1,132 @@
 {
-  "Parameters": {
-    "KafkaInstanceType": {
-      "Type": "String",
-      "Default": "t2.medium",
-      "Description": "EC2 instance type for Kafka"
+    "Parameters": {
+      "KafkaInstanceType": {
+        "Type": "String",
+        "Default": "t2.medium",
+        "Description": "EC2 instance type for Kafka"
+      },
+      "Environment": {
+        "Description": "Environment name (dev, prod)",
+        "Type": "String",
+        "Default": "dev"
+      },
+      "KeyName": {
+        "Description": "Name of an existing EC2 KeyPair",
+        "Type": "String",
+        "Default": "Key-east-1"
+      },
+      "PublicSubnetId": {
+        "Description": "The ID of the public subnet where the instance will be launched",
+        "Type": "String",
+        "Default": "subnet-00506ba208f733b5a"
+      },
+      "VPCId": {
+        "Description": "The ID of the VPC where the instance will be launched",
+        "Type": "String",
+        "Default": "vpc-0836bedb74e8e89aa"
+      }
     },
-    "Environment": {
-      "Description": "Environment name (dev, prod)",
-      "Type": "String",
-      "Default": "dev"
-    },
-    "KeyName": {
-      "Description": "Name of an existing EC2 KeyPair",
-      "Type": "String",
-      "Default": "Key-east-1"
-    },
-    "PublicSubnetId": {
-      "Description": "The ID of the public subnet where the instance will be launched",
-      "Type": "String",
-      "Default": "subnet-02ydg63e7276g2"
-    },
-    "SecondarySubnetId": {
-      "Description": "The ID of the secondary subnet to attach as an ENI",
-      "Type": "String",
-      "Default": "subnet-0dg62e26e7dg27"
-    },
-    "VPCId": {
-      "Description": "The ID of the VPC where the instance will be launched",
-      "Type": "String",
-      "Default": "vpc-08df25r26td1"
-    }
-  },
-  "Resources": {
-    "KafkaInstanceSecurityGroup": {
-      "Type": "AWS::EC2::SecurityGroup",
-      "Properties": {
-        "GroupDescription": "Enable SSH and Kafka access",
-        "VpcId": { "Ref": "VPCId" },
-        "SecurityGroupIngress": [
-          {
-            "IpProtocol": "tcp",
-            "FromPort": 22,
-            "ToPort": 22,
-            "CidrIp": "0.0.0.0/0"
+    "Resources": {
+      "KafkaInstanceSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+          "GroupDescription": "Enable SSH and Kafka access",
+          "VpcId": {
+            "Ref": "VPCId"
           },
-          {
-            "IpProtocol": "tcp",
-            "FromPort": 9092,
-            "ToPort": 9092,
-            "CidrIp": "0.0.0.0/0"
-          }
-        ],
-        "SecurityGroupEgress": [
-          {
-            "IpProtocol": "-1",
-            "CidrIp": "0.0.0.0/0"
-          }
-        ],
-        "Tags": [
-          {
-            "Key": "Name",
-            "Value": { "Fn::Sub": "${Environment}-kafka-sg" }
-          }
-        ]
-      }
-    },
-    "KafkaInstance": {
-      "Type": "AWS::EC2::Instance",
-      "Properties": {
-        "ImageId": {
-          "Fn::Sub": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
-        },
-        "InstanceType": { "Ref": "KafkaInstanceType" },
-        "SubnetId": { "Ref": "PublicSubnetId" },
-        "KeyName": { "Ref": "KeyName" },
-        "SecurityGroupIds": [
-          { "Ref": "KafkaInstanceSecurityGroup" }
-        ],
-        "UserData": {
-          "Fn::Base64": {
-            "Fn::Sub": [
-              "#!/bin/bash -ex\nexec > /var/log/user-data.log 2>&1\nsleep 30s\n\n# Update system and install Java 8 (Corretto)\nsudo dnf update -y\nsudo dnf install -y java-1.8.0-amazon-corretto\n\n# Create directories for Kafka\nmkdir -p /home/ec2-user/Downloads\nmkdir -p /home/ec2-user/kafka\n\n# Download and extract Kafka\ncurl \"https://archive.apache.org/dist/kafka/2.7.0/kafka_2.12-2.7.0.tgz\" -o /home/ec2-user/Downloads/kafka.tgz\ntar -xvzf /home/ec2-user/Downloads/kafka.tgz -C /home/ec2-user/kafka --strip-components=1\n\n# Set permissions\nchown -R ec2-user:ec2-user /home/ec2-user/kafka\nchmod -R 755 /home/ec2-user/kafka\n\n# Create log file for Kafka\ntouch /home/ec2-user/kafka/kafka.log\nchown ec2-user:ec2-user /home/ec2-user/kafka/kafka.log\n\n# Update Kafka configuration\necho \"delete.topic.enable = true\" >> /home/ec2-user/kafka/config/server.properties\necho \"auto.create.topics.enable = true\" >> /home/ec2-user/kafka/config/server.properties\n\n# Create systemd service for Zookeeper\ncat <<EOF | sudo tee /etc/systemd/system/zookeeper.service\n[Unit]\nRequires=network.target remote-fs.target\nAfter=network.target remote-fs.target\n\n[Service]\nType=simple\nUser=ec2-user\nExecStart=/home/ec2-user/kafka/bin/zookeeper-server-start.sh /home/ec2-user/kafka/config/zookeeper.properties\nExecStop=/home/ec2-user/kafka/bin/zookeeper-server-stop.sh\nRestart=on-abnormal\n\n[Install]\nWantedBy=multi-user.target\nEOF\n\n# Create systemd service for Kafka\ncat <<EOF | sudo tee /etc/systemd/system/kafka.service\n[Unit]\nRequires=zookeeper.service\nAfter=zookeeper.service\n\n[Service]\nType=simple\nUser=ec2-user\nExecStart=/bin/sh -c '/home/ec2-user/kafka/bin/kafka-server-start.sh /home/ec2-user/kafka/config/server.properties > /home/ec2-user/kafka/kafka.log 2>&1'\nExecStop=/home/ec2-user/kafka/bin/kafka-server-stop.sh\nRestart=on-abnormal\n\n[Install]\nWantedBy=multi-user.target\nEOF\n\n# Enable and start services\nsudo systemctl daemon-reload\nsleep 1\nsudo systemctl enable --now zookeeper.service\nsudo systemctl enable --now kafka.service\n",
-              {}
-            ]
-          }
-        },
-        "Tags": [
-          {
-            "Key": "Name",
-            "Value": { "Fn::Sub": "${Environment}-kafka" }
+          "SecurityGroupIngress": [
+            {
+              "IpProtocol": "tcp",
+              "FromPort": 22,
+              "ToPort": 22,
+              "CidrIp": "0.0.0.0/0"
+            },
+            {
+              "IpProtocol": "tcp",
+              "FromPort": 9092,
+              "ToPort": 9092,
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "SecurityGroupEgress": [
+            {
+              "IpProtocol": "-1",
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Sub": "${Environment}-kafka-sg"
+              }
+            }
+          ]
+        }
+      },
+      "KafkaInstance": {
+        "Type": "AWS::EC2::Instance",
+        "Properties": {
+          "ImageId": {
+            "Fn::Sub": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
           },
-          {
-            "Key": "Environment",
-            "Value": { "Ref": "Environment" }
+          "InstanceType": {
+            "Ref": "KafkaInstanceType"
           },
-          {
-            "Key": "OS",
-            "Value": "Amazon Linux"
+          "SubnetId": {
+            "Ref": "PublicSubnetId"
           },
-          {
-            "Key": "Managed",
-            "Value": "IAC"
-          }
-        ]
+          "KeyName": {
+            "Ref": "KeyName"
+          },
+          "SecurityGroupIds": [
+            {
+              "Ref": "KafkaInstanceSecurityGroup"
+            }
+          ],
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Sub": [
+                "#!/bin/bash -ex\nexec > /var/log/user-data.log 2>&1\nsleep 30s\n\n# Update system and install Java 8 (Corretto)\nsudo dnf update -y\nsudo dnf install -y java-1.8.0-amazon-corretto\n\n# Create directories for Kafka\nmkdir -p /home/ec2-user/Downloads\nmkdir -p /home/ec2-user/kafka\n\n# Download and extract Kafka\ncurl \"https://archive.apache.org/dist/kafka/2.7.0/kafka_2.12-2.7.0.tgz\" -o /home/ec2-user/Downloads/kafka.tgz\ntar -xvzf /home/ec2-user/Downloads/kafka.tgz -C /home/ec2-user/kafka --strip-components=1\n\n# Set permissions\nchown -R ec2-user:ec2-user /home/ec2-user/kafka\nchmod -R 755 /home/ec2-user/kafka\n\n# Create log file for Kafka\ntouch /home/ec2-user/kafka/kafka.log\nchown ec2-user:ec2-user /home/ec2-user/kafka/kafka.log\n\n# Update Kafka configuration\necho \"delete.topic.enable = true\" >> /home/ec2-user/kafka/config/server.properties\necho \"auto.create.topics.enable = true\" >> /home/ec2-user/kafka/config/server.properties\n\n# Create systemd service for Zookeeper\ncat <<EOF | sudo tee /etc/systemd/system/zookeeper.service\n[Unit]\nRequires=network.target remote-fs.target\nAfter=network.target remote-fs.target\n\n[Service]\nType=simple\nUser=ec2-user\nExecStart=/home/ec2-user/kafka/bin/zookeeper-server-start.sh /home/ec2-user/kafka/config/zookeeper.properties\nExecStop=/home/ec2-user/kafka/bin/zookeeper-server-stop.sh\nRestart=on-abnormal\n\n[Install]\nWantedBy=multi-user.target\nEOF\n\n# Create systemd service for Kafka\ncat <<EOF | sudo tee /etc/systemd/system/kafka.service\n[Unit]\nRequires=zookeeper.service\nAfter=zookeeper.service\n\n[Service]\nType=simple\nUser=ec2-user\nExecStart=/bin/sh -c '/home/ec2-user/kafka/bin/kafka-server-start.sh /home/ec2-user/kafka/config/server.properties > /home/ec2-user/kafka/kafka.log 2>&1'\nExecStop=/home/ec2-user/kafka/bin/kafka-server-stop.sh\nRestart=on-abnormal\n\n[Install]\nWantedBy=multi-user.target\nEOF\n\n# Enable and start services\nsudo systemctl daemon-reload\nsleep 1\nsudo systemctl enable --now zookeeper.service\nsudo systemctl enable --now kafka.service\n",
+                {}
+              ]
+            }
+          },
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Sub": "${Environment}-kafka"
+              }
+            },
+            {
+              "Key": "Environment",
+              "Value": {
+                "Ref": "Environment"
+              }
+            },
+            {
+              "Key": "OS",
+              "Value": "Amazon Linux"
+            },
+            {
+              "Key": "Managed",
+              "Value": "IAC"
+            }
+          ]
+        }
       }
     },
-    "KafkaSecondaryENI": {
-      "Type": "AWS::EC2::NetworkInterface",
-      "Properties": {
-        "SubnetId": { "Ref": "SecondarySubnetId" },
-        "Description": "Secondary ENI for Kafka EC2",
-        "GroupSet": [
-          { "Ref": "KafkaInstanceSecurityGroup" }
-        ],
-        "Tags": [
-          {
-            "Key": "Name",
-            "Value": { "Fn::Sub": "${Environment}-kafka-eni" }
-          }
-        ]
-      }
-    },
-    "KafkaENIAttachment": {
-      "Type": "AWS::EC2::NetworkInterfaceAttachment",
-      "Properties": {
-        "InstanceId": { "Ref": "KafkaInstance" },
-        "NetworkInterfaceId": { "Ref": "KafkaSecondaryENI" },
-        "DeviceIndex": "1"
-      }
-    }
-  },
-  "Outputs": {
-    "KafkaInstancePublicIP": {
-      "Description": "Public IP of the Kafka EC2 instance",
-      "Value": {
-        "Fn::GetAtt": [
-          "KafkaInstance",
-          "PublicIp"
-        ]
-      }
-    },
-    "KafkaSecondaryENIPrivateIP": {
-      "Description": "Private IP of the secondary ENI",
-      "Value": {
-        "Fn::GetAtt": [ "KafkaSecondaryENI", "PrimaryPrivateIpAddress" ]
+    "Outputs": {
+      "KafkaInstancePublicIP": {
+        "Description": "Public IP of the Kafka EC2 instance",
+        "Value": {
+          "Fn::GetAtt": [
+            "KafkaInstance",
+            "PublicIp"
+          ]
+        }
       }
     }
   }
-}
+  
